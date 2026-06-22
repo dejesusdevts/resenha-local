@@ -1,0 +1,8 @@
+{
+  "name": "root-detection",
+  "version": "0.1.0",
+  "description": "Detecção local de root e ambiente comprometido — sem internet, sem serviço externo.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED"
+}

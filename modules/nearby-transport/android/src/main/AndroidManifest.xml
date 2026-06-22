@@ -1,0 +1,55 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Necessária para o sistema permitir varredura/anúncio Bluetooth Low Energy -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <!-- Bluetooth "clássico", exigido em versões anteriores ao Android 12
+         (modelo de permissão antigo, antes de BLUETOOTH_SCAN/ADVERTISE/CONNECT
+         existirem). -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+    <!-- Exigidas pela Nearby Connections para o "upgrade" de uma conexão BLE
+         para um canal de dados mais rápido via Wi-Fi, usado pela estratégia
+         P2P_CLUSTER mesmo sem internet. Sem isso, a descoberta funciona mas
+         a conexão fica instável/trava — foi o erro 8032
+         MISSING_PERMISSION_ACCESS_WIFI_STATE visto em teste real. São
+         permissões "normais" (concedidas automaticamente, sem prompt). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Android 12+ (API 31+): permissões granulares de Bluetooth.
+         "neverForLocation" declara que não usamos o BLE para inferir localização,
+         o que dispensa a permissão de localização nesses aparelhos. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:targetApi="31" />
+
+    <!-- Android 13+ (API 33+): permissão dedicada para descoberta via Wi-Fi -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="33" />
+
+    <!-- Necessária em versões anteriores ao Android 12 para varredura BLE -->
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!-- Serviço em primeiro plano: mantém a descoberta ativa com o app em segundo plano -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" tools:targetApi="33" />
+
+    <application>
+        <service
+            android:name="com.resenhalocal.nearbytransport.NearbyDiscoveryService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
+    </application>
+</manifest>

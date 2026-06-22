@@ -1,0 +1,28 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'com.resenhalocal.rootdetection'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+if (expoModulesCorePlugin.exists()) {
+  apply from: expoModulesCorePlugin
+  applyKotlinExpoModulesCorePlugin()
+}
+
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+android {
+  namespace "com.resenhalocal.rootdetection"
+  compileSdkVersion safeExtGet("compileSdkVersion", 34)
+  defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 26)
+    targetSdkVersion safeExtGet("targetSdkVersion", 34)
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+}

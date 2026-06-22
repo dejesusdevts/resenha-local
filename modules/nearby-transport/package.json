@@ -1,0 +1,8 @@
+{
+  "name": "nearby-transport",
+  "version": "0.1.0",
+  "description": "Módulo nativo local que expõe a Nearby Connections API do Google (Android) para o app Resenha Local.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED"
+}
