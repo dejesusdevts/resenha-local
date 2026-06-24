@@ -39,7 +39,7 @@ export function computeSafetyNumber(publicKeyA: Uint8Array, publicKeyB: Uint8Arr
   combined.set(first, 0);
   combined.set(second, first.length);
 
-  const hash = sodium.crypto_generichash(32, combined);
+  const hash = sodium.crypto_generichash(32, combined, null);
   const hex = sodium.to_hex(hash).toUpperCase();
 
   // Quebra em grupos de 5 caracteres para facilitar leitura e comparação.
@@ -58,7 +58,7 @@ export function computeSafetyNumber(publicKeyA: Uint8Array, publicKeyB: Uint8Arr
  * resistência a colisão/pré-imagem que importam aqui.
  */
 export function computeIdentityFingerprint(publicKey: Uint8Array): string {
-  const hash = sodium.crypto_generichash(32, publicKey);
+  const hash = sodium.crypto_generichash(32, publicKey, null);
   return sodium.to_hex(hash);
 }
 
@@ -70,7 +70,8 @@ export function computeIdentityFingerprint(publicKey: Uint8Array): string {
 export function formatFingerprint(fingerprintHex: string): string {
   return (fingerprintHex.slice(0, 30).match(/.{1,5}/g) ?? []).join(' ').toUpperCase();
 }
- *
+
+/**
  * Importante: NÃO usar o endpointId da Nearby Connections como ID de
  * conversa — ele é local a cada aparelho (o ID que A usa para "minha
  * conexão com B" não é necessariamente o mesmo que B usa para "minha
@@ -94,6 +95,6 @@ export function computeConversationId(publicKeyA: Uint8Array, publicKeyB: Uint8A
   combined.set(first, domainTag.length);
   combined.set(second, domainTag.length + first.length);
 
-  const hash = sodium.crypto_generichash(16, combined);
+  const hash = sodium.crypto_generichash(16, combined, null);
   return sodium.to_hex(hash);
 }
