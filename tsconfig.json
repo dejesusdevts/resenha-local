@@ -2,10 +2,13 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    "ignoreDeprecations": "5.0",
     "baseUrl": ".",
     "paths": {
-      "nearby-transport": ["./modules/nearby-transport"]
+      "nearby-transport": ["./modules/nearby-transport"],
+      "root-detection": ["./modules/root-detection"]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "dist-test"]
 }
