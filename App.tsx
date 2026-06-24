@@ -5,7 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import sodium from 'react-native-libsodium';
 import RootNavigator from './src/navigation/RootNavigator';
 import { initDatabase, purgeExpiredMessages } from './src/storage/database';
-import { loadOrCreateDatabaseKey } from './src/crypto/keys';
+import { loadOrCreateDatabaseKey, isBiometricReady } from './src/crypto/keys';
 import { useProfileStore } from './src/state/profileStore';
 import * as profileRepository from './src/storage/repositories/profileRepository';
 import { getSecurityStatus, isOperationBlocked } from './src/security/rootPolicy';
@@ -14,7 +14,8 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const setProfile = useProfileStore((state) => state.setProfile);
-
+  const setBiometricReady = useProfileStore((state) => state.setBiometricReady);
+  
   useEffect(() => {
     (async () => {
       try {
@@ -42,6 +43,11 @@ export default function App() {
         const dbKey = await loadOrCreateDatabaseKey();
         await initDatabase(dbKey);
         purgeExpiredMessages();
+
+        // Restaura estado de biometria — se já configurado em sessão anterior,
+        // o usuário não vai ver a tela de consentimento de novo.
+        const biometricConfigured = await isBiometricReady();
+        setBiometricReady(biometricConfigured);
 
         const existingProfile = profileRepository.getProfile();
         if (existingProfile) setProfile(existingProfile);

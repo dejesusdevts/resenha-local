@@ -43,6 +43,8 @@ export type IdentityKeyPair = {
 const PUBLIC_KEY_STORAGE_KEY = 'resenha_local_identity_public_key';
 const SECRET_KEY_STORAGE_KEY = 'resenha_local_identity_secret_key';
 const DB_KEY_STORAGE_KEY = 'resenha_local_db_encryption_key';
+const BIOMETRIC_READY_KEY = 'resenha_local_biometric_ready';
+const BIOMETRIC_SENTINEL_KEY = 'resenha_local_biometric_sentinel';
 
 const baseOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
@@ -126,4 +128,53 @@ export async function wipeAllSecrets(): Promise<void> {
   await SecureStore.deleteItemAsync(PUBLIC_KEY_STORAGE_KEY);
   await SecureStore.deleteItemAsync(SECRET_KEY_STORAGE_KEY);
   await SecureStore.deleteItemAsync(DB_KEY_STORAGE_KEY);
+  await SecureStore.deleteItemAsync(BIOMETRIC_READY_KEY);
+  await SecureStore.deleteItemAsync(BIOMETRIC_SENTINEL_KEY);
+}
+
+/**
+ * Verifica se o usuário já passou pelo fluxo de configuração biométrica.
+ * Usado para decidir se exibe a BiometricConsentScreen ou pula direto
+ * para o onboarding / tela de radar.
+ */
+export async function isBiometricReady(): Promise<boolean> {
+  const val = await SecureStore.getItemAsync(BIOMETRIC_READY_KEY, baseOptions);
+  return val === 'true';
+}
+
+/**
+ * Dispara o prompt de autenticação (biometria ou PIN/padrão do aparelho)
+ * para que o usuário confirme sua presença antes de o app criar a
+ * identidade criptográfica.
+ *
+ * Como funciona:
+ *   1. Grava um valor sentinela no SecureStore com requireAuthentication.
+ *      No Android, a gravação em si não exige autenticação.
+ *   2. Lê de volta com requireAuthentication — é nessa leitura que o
+ *      Android exibe o BiometricPrompt (digital, face ou PIN/padrão).
+ *   3. Se a leitura retornar o valor correto, o usuário se autenticou.
+ *      Grava a flag biometricReady (sem requireAuthentication) para não
+ *      pedir de novo na próxima abertura.
+ *
+ * Retorna true se o usuário se autenticou com sucesso, false se cancelou
+ * ou o aparelho não tem nenhum método de bloqueio configurado.
+ */
+export async function triggerBiometricSetup(): Promise<boolean> {
+  try {
+    // Passo 1: grava o sentinela (sem prompt)
+    await SecureStore.setItemAsync(BIOMETRIC_SENTINEL_KEY, 'verified', privateKeyOptions);
+
+    // Passo 2: lê de volta — este é o ponto onde o BiometricPrompt aparece
+    const result = await SecureStore.getItemAsync(BIOMETRIC_SENTINEL_KEY, privateKeyOptions);
+
+    if (result !== 'verified') return false;
+
+    // Sucesso: registra que o setup foi feito e limpa o sentinela
+    await SecureStore.setItemAsync(BIOMETRIC_READY_KEY, 'true', baseOptions);
+    await SecureStore.deleteItemAsync(BIOMETRIC_SENTINEL_KEY);
+    return true;
+  } catch {
+    // Usuário cancelou, ou aparelho sem biometria/PIN configurado
+    return false;
+  }
 }
