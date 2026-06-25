@@ -105,7 +105,8 @@ class NearbyTransportServiceImpl {
         useDevicesStore
           .getState()
           .upsertDevice({ endpointId, username: endpointName, status: 'discovered' });
-        NearbyTransport.default.requestConnection(endpointId, profile.username).catch(() => {});
+        // Conexão NÃO é feita automaticamente — o usuário toca no dispositivo
+        // na RadarScreen para iniciar (ver connectToEndpoint abaixo).
       }),
 
       NearbyTransport.addEndpointLostListener(({ endpointId }) => {
@@ -170,7 +171,7 @@ class NearbyTransportServiceImpl {
 
     this.peerIdentityKeysByEndpoint.clear();
     this.ephemeralKeyPairsByEndpoint.clear();
-    this.ratchetStatesByConversation.clear(); // só cache em memória — o estado salvo no disco continua lá
+    this.ratchetStatesByConversation.clear();
     this.conversationIdByEndpoint.clear();
     this.typingTimeouts.forEach((timeout) => clearTimeout(timeout));
     this.typingTimeouts.clear();
@@ -179,6 +180,37 @@ class NearbyTransportServiceImpl {
     useTypingStore.getState().reset();
     useSecurityStore.getState().reset();
     this.started = false;
+  }
+
+  /**
+   * Inicia a conexão com um dispositivo descoberto. Deve ser chamado
+   * pela UI quando o usuário TOCAR no dispositivo — nunca chamado
+   * automaticamente ao descobrir um endpoint.
+   *
+   * O fluxo completo após connectToEndpoint():
+   *   discovered → (toque do usuário) → connecting
+   *     → onConnectionResult(connected) → sendHandshake
+   *       → handshake recebido → ratchet inicializado → conversationId disponível
+   */
+  async connectToEndpoint(endpointId: string): Promise<void> {
+    if (!this.started) return;
+    const profile = useProfileStore.getState().profile;
+    if (!profile) return;
+
+    const current = useDevicesStore.getState().devices[endpointId];
+    if (!current || current.status === 'connected' || current.status === 'connecting') return;
+
+    useDevicesStore.getState().upsertDevice({
+      ...current,
+      status: 'connecting',
+    });
+
+    try {
+      await NearbyTransport.default.requestConnection(endpointId, profile.username);
+    } catch {
+      // Se falhar, volta para "discovered" para o usuário poder tentar de novo.
+      useDevicesStore.getState().upsertDevice({ ...current, status: 'discovered' });
+    }
   }
 
   /** ID de conversa estável, ou null se o handshake ainda não terminou
