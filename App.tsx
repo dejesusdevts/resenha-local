@@ -1,77 +1,111 @@
 import 'react-native-get-random-values';
 import React, { useEffect, useState } from 'react';
-import { View, ActivityIndicator, Text, StyleSheet, Alert } from 'react-native';
+import { View, ActivityIndicator, Text, StyleSheet, Pressable, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import sodium from 'react-native-libsodium';
 import RootNavigator from './src/navigation/RootNavigator';
 import { initDatabase, purgeExpiredMessages } from './src/storage/database';
-import { loadOrCreateDatabaseKey, isBiometricReady } from './src/crypto/keys';
+import { loadOrCreateDatabaseKey, loadOrCreateIdentityKeyPair, isBiometricReady } from './src/crypto/keys';
+import { authenticateWithBiometrics } from './src/security/biometricAuth';
 import { useProfileStore } from './src/state/profileStore';
 import * as profileRepository from './src/storage/repositories/profileRepository';
 import { getSecurityStatus, isOperationBlocked } from './src/security/rootPolicy';
 
+type AppStatus = 'loading' | 'auth_needed' | 'ready' | 'error';
+
 export default function App() {
-  const [ready, setReady] = useState(false);
-  const [initError, setInitError] = useState<string | null>(null);
+  const [status, setStatus] = useState<AppStatus>('loading');
+  const [errorMessage, setErrorMessage] = useState('');
   const setProfile = useProfileStore((state) => state.setProfile);
   const setBiometricReady = useProfileStore((state) => state.setBiometricReady);
-  
-  useEffect(() => {
-    (async () => {
-      try {
-        await sodium.ready;
 
-        // Verificação de root antes de qualquer operação criptográfica.
-        const secStatus = await getSecurityStatus();
-        if (secStatus.status === 'compromised') {
-          if (isOperationBlocked('any')) {
-            setInitError(
-              'Ambiente comprometido detectado. O app não pode operar com segurança neste dispositivo.'
-            );
-            return;
-          }
-          // Política 'alert' ou 'restricted': avisa e segue.
-          Alert.alert(
-            'Aviso de segurança',
-            'Este dispositivo parece ter sido modificado (root detectado). ' +
-              'O Resenha Local pode não proteger seus dados adequadamente neste ambiente. ' +
-              'Continue por sua conta e risco.',
-            [{ text: 'Entendido', style: 'default' }]
-          );
+  useEffect(() => { initialize(); }, []);
+
+  async function initialize() {
+    setStatus('loading');
+    try {
+      await sodium.ready;
+
+      // Verificação de root — filtrada para dev builds (ver rootPolicy.ts).
+      const secStatus = await getSecurityStatus();
+      if (secStatus.status === 'compromised') {
+        if (isOperationBlocked('any')) {
+          setErrorMessage('Ambiente comprometido detectado. O app não pode operar com segurança neste dispositivo.');
+          setStatus('error');
+          return;
+        }
+        Alert.alert(
+          'Aviso de segurança',
+          'Este dispositivo parece ter sido modificado. O Resenha Local pode não proteger seus dados adequadamente.',
+          [{ text: 'Entendido' }]
+        );
+      }
+
+      // Banco não precisa de biometria — inicializa antes de qualquer tela.
+      const dbKey = await loadOrCreateDatabaseKey();
+      await initDatabase(dbKey);
+      purgeExpiredMessages();
+
+      const biometricConfigured = await isBiometricReady();
+      setBiometricReady(biometricConfigured);
+
+      if (biometricConfigured) {
+        // Usuário voltando: pede biometria UMA vez com mensagem clara.
+        const authenticated = await authenticateWithBiometrics(
+          'Verifique sua identidade para acessar o Resenha Local'
+        );
+
+        if (!authenticated) {
+          // Usuário cancelou — mostra tela de retry, não erro fatal.
+          setStatus('auth_needed');
+          return;
         }
 
-        const dbKey = await loadOrCreateDatabaseKey();
-        await initDatabase(dbKey);
-        purgeExpiredMessages();
-
-        // Restaura estado de biometria — se já configurado em sessão anterior,
-        // o usuário não vai ver a tela de consentimento de novo.
-        const biometricConfigured = await isBiometricReady();
-        setBiometricReady(biometricConfigured);
+        // Carrega as chaves (sem prompt — biometria já confirmada acima).
+        await loadOrCreateIdentityKeyPair();
 
         const existingProfile = profileRepository.getProfile();
         if (existingProfile) setProfile(existingProfile);
-
-        setReady(true);
-      } catch (error) {
-        console.warn('Erro na inicialização:', error);
-        setInitError('Não foi possível iniciar o app com segurança. Tente reinstalar.');
       }
-    })();
-  }, []);
+      // biometricConfigured = false: novos usuários vão para BiometricConsentScreen,
+      // que faz sua própria autenticação e carrega as chaves lá.
 
-  if (initError) {
+      setStatus('ready');
+    } catch (error: any) {
+      console.warn('Erro na inicialização:', error);
+      setErrorMessage('Não foi possível iniciar o app com segurança. Tente reinstalar.');
+      setStatus('error');
+    }
+  }
+
+  if (status === 'loading') {
     return (
       <View style={styles.container}>
-        <Text style={styles.errorText}>{initError}</Text>
+        <ActivityIndicator color="#1d9e75" />
+        <Text style={styles.loadingText}>Carregando...</Text>
       </View>
     );
   }
 
-  if (!ready) {
+  if (status === 'auth_needed') {
     return (
       <View style={styles.container}>
-        <ActivityIndicator color="#1d9e75" />
+        <Text style={styles.icon}>🔐</Text>
+        <Text style={styles.authTitle}>Autenticação necessária</Text>
+        <Text style={styles.authSubtitle}>
+          Confirme sua identidade para acessar o Resenha Local.
+        </Text>
+        <Pressable style={styles.retryButton} onPress={initialize}>
+          <Text style={styles.retryText}>Autenticar</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.errorText}>{errorMessage}</Text>
       </View>
     );
   }
@@ -85,6 +119,24 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#101314', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  container: {
+    flex: 1, backgroundColor: '#101314',
+    alignItems: 'center', justifyContent: 'center', padding: 24,
+  },
+  loadingText: { color: '#666', marginTop: 12, fontSize: 14 },
+  icon: { fontSize: 52, marginBottom: 16 },
+  authTitle: {
+    color: '#fff', fontSize: 20, fontWeight: '700',
+    marginBottom: 8, textAlign: 'center',
+  },
+  authSubtitle: {
+    color: '#a0a0a0', fontSize: 14, lineHeight: 20,
+    textAlign: 'center', marginBottom: 28,
+  },
+  retryButton: {
+    backgroundColor: '#1d9e75', borderRadius: 12,
+    paddingVertical: 14, paddingHorizontal: 32,
+  },
+  retryText: { color: '#fff', fontWeight: '600', fontSize: 16 },
   errorText: { color: '#E24B4A', textAlign: 'center', fontSize: 15, lineHeight: 22 },
 });

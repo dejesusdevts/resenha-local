@@ -3,36 +3,20 @@ import * as SecureStore from 'expo-secure-store';
 import { toBase64, fromBase64 } from './encoding';
 
 /**
- * Identidade criptográfica do dispositivo, protegida com autenticação
- * biométrica quando o aparelho suportar.
+ * Identidade criptográfica do dispositivo.
  *
- * CICLO DE VIDA DA CHAVE PRIVADA EM MEMÓRIA:
- *   - Retornada apenas dentro do escopo de cada função — quem recebe o
- *     par de chaves é responsável por descartar a referência assim que
- *     terminar o uso (ex.: ao sair do escopo de handleHandshake). Nunca
- *     armazene `IdentityKeyPair` em um store global de longa duração.
- *   - O GC do JavaScript não oferece limpeza determinística de
- *     memória — não dá pra "zerar" um Uint8Array em JS e ter garantia
- *     que o conteúdo sumiu do heap antes do próximo GC. Isso é uma
- *     limitação da plataforma, documentada em docs/threat-model.md
- *     (cenário "malware com privilégios elevados").
+ * BIOMETRIA — UMA VEZ POR SESSÃO:
+ *   A biometria NÃO é controlada por `requireAuthentication` do SecureStore
+ *   (que dispararia o prompt em toda operação criptográfica — write E read —
+ *   resultando em prompts duplos). Em vez disso, o controle de acesso
+ *   biométrico fica em src/security/biometricAuth.ts, chamado uma única vez
+ *   por sessão (BiometricConsentScreen para novos usuários, App.tsx para
+ *   quem volta). Após autenticação, as chaves são carregadas e mantidas em
+ *   cache de memória para o resto da sessão.
  *
- * BIOMETRIA:
- *   - WHEN_UNLOCKED_THIS_DEVICE_ONLY = chave não migrável, não incluída
- *     em backups do Android, exige aparelho desbloqueado para leitura.
- *     Em aparelhos com Android Keystore seguro (hardware-backed), a
- *     chave de proteção do SecureStore nunca sai do TEE (Trusted
- *     Execution Environment), nem mesmo para o processo do app.
- *   - A flag `requireAuthentication: true` ativa a autenticação
- *     biométrica (digital/face) antes de liberar o valor armazenado,
- *     quando suportada pelo aparelho. Em aparelhos sem biometria, o
- *     SecureStore usa PIN/padrão como fallback automaticamente.
- *   - A chave pública é armazenada SEM autenticação biométrica — é
- *     pública por definição e precisa estar disponível para exibição
- *     de fingerprint mesmo com o app em segundo plano.
- *   - A chave PRIVADA usa autenticação biométrica — só é acessível com
- *     o usuário presente, impedindo que um processo em segundo plano
- *     (malware, outro app) a leia silenciosamente.
+ *   Proteção em repouso: WHEN_UNLOCKED_THIS_DEVICE_ONLY — a chave do
+ *   Keystore que protege o SecureStore só é usável com o aparelho
+ *   desbloqueado, e nunca é exportável nem incluída em backups.
  */
 
 export type IdentityKeyPair = {
@@ -42,55 +26,61 @@ export type IdentityKeyPair = {
 
 const PUBLIC_KEY_STORAGE_KEY = 'resenha_local_identity_public_key';
 const SECRET_KEY_STORAGE_KEY = 'resenha_local_identity_secret_key';
-const DB_KEY_STORAGE_KEY = 'resenha_local_db_encryption_key';
-const BIOMETRIC_READY_KEY = 'resenha_local_biometric_ready';
-const BIOMETRIC_SENTINEL_KEY = 'resenha_local_biometric_sentinel';
+const DB_KEY_STORAGE_KEY     = 'resenha_local_db_encryption_key';
+const BIOMETRIC_READY_KEY    = 'resenha_local_biometric_ready';
 
-const baseOptions: SecureStore.SecureStoreOptions = {
+const secureOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
 };
 
-/** Usado apenas para a chave privada — pede biometria/PIN ao acessar. */
-const privateKeyOptions: SecureStore.SecureStoreOptions = {
-  keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-  requireAuthentication: true,
-};
+// Cache de sessão — populado após autenticação biométrica bem-sucedida.
+// Limpo ao fechar o app (memória descartada pelo SO) ou em wipeAllSecrets().
+let identityKeyCache: IdentityKeyPair | null = null;
 
+/**
+ * Carrega (ou cria) o par de chaves de identidade.
+ * NÃO dispara biometria — a autenticação deve ter sido feita antes via
+ * biometricAuth.ts. Após a primeira chamada bem-sucedida, retorna o
+ * cache sem tocar o SecureStore.
+ */
 export async function loadOrCreateIdentityKeyPair(): Promise<IdentityKeyPair> {
+  if (identityKeyCache) return identityKeyCache;
+
   await sodium.ready;
 
-  const storedPublic = await SecureStore.getItemAsync(PUBLIC_KEY_STORAGE_KEY, baseOptions);
+  const storedPublic = await SecureStore.getItemAsync(PUBLIC_KEY_STORAGE_KEY, secureOptions);
 
   if (storedPublic) {
-    // Chave privada: pode disparar prompt biométrico aqui, por design.
-    const storedSecret = await SecureStore.getItemAsync(SECRET_KEY_STORAGE_KEY, privateKeyOptions);
+    const storedSecret = await SecureStore.getItemAsync(SECRET_KEY_STORAGE_KEY, secureOptions);
     if (storedSecret) {
-      return {
+      identityKeyCache = {
         publicKey: fromBase64(storedPublic),
         privateKey: fromBase64(storedSecret),
       };
+      return identityKeyCache;
     }
-    // Chave pública sem privada = estado inconsistente (ex.: restauração
-    // parcial de backup). Regera o par inteiro.
+    // Estado inconsistente — regera o par.
     await SecureStore.deleteItemAsync(PUBLIC_KEY_STORAGE_KEY);
   }
 
-  // Primeira execução (ou recuperação de inconsistência): gera novo par.
+  // Primeiro uso: gera e persiste. Não precisa de read-back porque
+  // já temos os valores em memória do próprio crypto_box_keypair().
   const keyPair = sodium.crypto_box_keypair();
+  await SecureStore.setItemAsync(PUBLIC_KEY_STORAGE_KEY, toBase64(keyPair.publicKey), secureOptions);
+  await SecureStore.setItemAsync(SECRET_KEY_STORAGE_KEY, toBase64(keyPair.privateKey), secureOptions);
 
-  await SecureStore.setItemAsync(PUBLIC_KEY_STORAGE_KEY, toBase64(keyPair.publicKey), baseOptions);
-  await SecureStore.setItemAsync(SECRET_KEY_STORAGE_KEY, toBase64(keyPair.privateKey), privateKeyOptions);
-
-  return { publicKey: keyPair.publicKey, privateKey: keyPair.privateKey };
+  identityKeyCache = { publicKey: keyPair.publicKey, privateKey: keyPair.privateKey };
+  return identityKeyCache;
 }
 
-/**
- * Retorna só a chave pública, sem pedir biometria — seguro para usar em
- * segundo plano ou na tela de fingerprint onde o usuário não espera prompt.
- */
+export function clearIdentityKeyCache(): void {
+  identityKeyCache = null;
+}
+
 export async function loadPublicKeyOnly(): Promise<Uint8Array | null> {
+  if (identityKeyCache) return identityKeyCache.publicKey;
   await sodium.ready;
-  const stored = await SecureStore.getItemAsync(PUBLIC_KEY_STORAGE_KEY, baseOptions);
+  const stored = await SecureStore.getItemAsync(PUBLIC_KEY_STORAGE_KEY, secureOptions);
   return stored ? fromBase64(stored) : null;
 }
 
@@ -98,83 +88,28 @@ export function publicKeyToBase64(publicKey: Uint8Array): string {
   return toBase64(publicKey);
 }
 
-/**
- * Chave simétrica para cifrar o banco SQLite local (SQLCipher).
- * SEPARADA intencionalmente das chaves de identidade/conversa:
- *   - Comprometer a chave do banco não expõe chaves de identidade
- *     (que estão no Android Keystore, não no banco), e vice-versa.
- *   - Permite rotação futura da chave do banco (PRAGMA rekey) sem
- *     afetar nenhuma conversa ou identidade já salva.
- * Não usa biometria aqui: a chave do banco precisa ser acessível na
- * inicialização do app (App.tsx, antes de qualquer tela aparecer), e
- * um prompt biométrico nesse momento seria ruim para a UX. A proteção
- * em repouso do banco vem do SQLCipher + do próprio Android Keystore
- * (WHEN_UNLOCKED_THIS_DEVICE_ONLY).
- */
+export async function isBiometricReady(): Promise<boolean> {
+  const val = await SecureStore.getItemAsync(BIOMETRIC_READY_KEY, secureOptions);
+  return val === 'true';
+}
+
+export async function markBiometricReady(): Promise<void> {
+  await SecureStore.setItemAsync(BIOMETRIC_READY_KEY, 'true', secureOptions);
+}
+
 export async function loadOrCreateDatabaseKey(): Promise<string> {
   await sodium.ready;
-
-  const existing = await SecureStore.getItemAsync(DB_KEY_STORAGE_KEY, baseOptions);
+  const existing = await SecureStore.getItemAsync(DB_KEY_STORAGE_KEY, secureOptions);
   if (existing) return existing;
-
-  const keyBytes = sodium.randombytes_buf(32);
-  const key = sodium.to_hex(keyBytes);
-  await SecureStore.setItemAsync(DB_KEY_STORAGE_KEY, key, baseOptions);
+  const key = sodium.to_hex(sodium.randombytes_buf(32));
+  await SecureStore.setItemAsync(DB_KEY_STORAGE_KEY, key, secureOptions);
   return key;
 }
 
-/** Apaga toda a identidade local — usado em "Apagar todos os dados". */
 export async function wipeAllSecrets(): Promise<void> {
+  identityKeyCache = null;
   await SecureStore.deleteItemAsync(PUBLIC_KEY_STORAGE_KEY);
   await SecureStore.deleteItemAsync(SECRET_KEY_STORAGE_KEY);
   await SecureStore.deleteItemAsync(DB_KEY_STORAGE_KEY);
   await SecureStore.deleteItemAsync(BIOMETRIC_READY_KEY);
-  await SecureStore.deleteItemAsync(BIOMETRIC_SENTINEL_KEY);
-}
-
-/**
- * Verifica se o usuário já passou pelo fluxo de configuração biométrica.
- * Usado para decidir se exibe a BiometricConsentScreen ou pula direto
- * para o onboarding / tela de radar.
- */
-export async function isBiometricReady(): Promise<boolean> {
-  const val = await SecureStore.getItemAsync(BIOMETRIC_READY_KEY, baseOptions);
-  return val === 'true';
-}
-
-/**
- * Dispara o prompt de autenticação (biometria ou PIN/padrão do aparelho)
- * para que o usuário confirme sua presença antes de o app criar a
- * identidade criptográfica.
- *
- * Como funciona:
- *   1. Grava um valor sentinela no SecureStore com requireAuthentication.
- *      No Android, a gravação em si não exige autenticação.
- *   2. Lê de volta com requireAuthentication — é nessa leitura que o
- *      Android exibe o BiometricPrompt (digital, face ou PIN/padrão).
- *   3. Se a leitura retornar o valor correto, o usuário se autenticou.
- *      Grava a flag biometricReady (sem requireAuthentication) para não
- *      pedir de novo na próxima abertura.
- *
- * Retorna true se o usuário se autenticou com sucesso, false se cancelou
- * ou o aparelho não tem nenhum método de bloqueio configurado.
- */
-export async function triggerBiometricSetup(): Promise<boolean> {
-  try {
-    // Passo 1: grava o sentinela (sem prompt)
-    await SecureStore.setItemAsync(BIOMETRIC_SENTINEL_KEY, 'verified', privateKeyOptions);
-
-    // Passo 2: lê de volta — este é o ponto onde o BiometricPrompt aparece
-    const result = await SecureStore.getItemAsync(BIOMETRIC_SENTINEL_KEY, privateKeyOptions);
-
-    if (result !== 'verified') return false;
-
-    // Sucesso: registra que o setup foi feito e limpa o sentinela
-    await SecureStore.setItemAsync(BIOMETRIC_READY_KEY, 'true', baseOptions);
-    await SecureStore.deleteItemAsync(BIOMETRIC_SENTINEL_KEY);
-    return true;
-  } catch {
-    // Usuário cancelou, ou aparelho sem biometria/PIN configurado
-    return false;
-  }
 }
