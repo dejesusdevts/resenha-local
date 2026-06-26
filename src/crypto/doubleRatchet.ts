@@ -246,6 +246,21 @@ export function ratchetDecrypt(
 
 // --- Primitivas reais (libsodium), usadas em produção -----------------
 
+/**
+ * Copia src (Uint8Array nativo JSI) para um Uint8Array JS puro, byte a
+ * byte, sem acessar .buffer nem .set(). O binding react-native-libsodium
+ * retorna Uint8Array JSI cujo .buffer é undefined no Hermes; funções como
+ * crypto_aead_xchacha20poly1305_ietf_encrypt falham com "input type not
+ * yet implemented" ao receber esses objetos. Copiar byte a byte produz um
+ * Uint8Array puramente JS, aceito por qualquer função do binding.
+ * Idêntico ao jsOwned em hkdf.ts — mantido local para não criar acoplamento.
+ */
+function jsOwned(src: Uint8Array): Uint8Array {
+  const dst = new Uint8Array(src.length);
+  for (let i = 0; i < src.length; i++) dst[i] = src[i];
+  return dst;
+}
+
 export function createSodiumRatchetPrimitives(
   sodium: any,
   hkdfExpand: (key: Uint8Array, info: Uint8Array, length: number) => Uint8Array,
@@ -257,7 +272,9 @@ export function createSodiumRatchetPrimitives(
   return {
     generateDHKeyPair: () => {
       const kp = sodium.crypto_box_keypair();
-      return { publicKey: kp.publicKey, privateKey: kp.privateKey };
+      // crypto_box_keypair retorna Uint8Array JSI — copiar para JS puro
+      // para que operações DH e encodeHeaderForAAD não propaguem o tipo nativo.
+      return { publicKey: jsOwned(kp.publicKey), privateKey: jsOwned(kp.privateKey) };
     },
     dh: (ourPrivateKey, theirPublicKey) => rawDiffieHellman(ourPrivateKey, theirPublicKey),
     kdfRootKey: (rootKey, dhOutput) => {
@@ -269,24 +286,57 @@ export function createSodiumRatchetPrimitives(
       messageKey: hkdfExpand(chainKey, utf8Encode('resenha-local:message'), 32),
     }),
     encrypt: (messageKey, plaintext, associatedData) => {
-      const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-      const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
-        plaintext,
-        associatedData,
-        null,
-        nonce,
-        messageKey
-      );
+      // crypto_aead_xchacha20poly1305_ietf_encrypt falha neste binding com
+      // "input type not yet implemented" ao receber Uint8Arrays JS-heap.
+      // Substituído por crypto_secretbox_easy (XSalsa20-Poly1305) — mesma
+      // família do crypto_box_easy que já funciona neste binding.
+      //
+      // Como secretbox não tem suporte nativo a AAD, embutimos os dados
+      // associados no início da mensagem antes de cifrar:
+      //   packed = [4 bytes: aadLen] [aad] [plaintext]
+      // O Poly1305 autentica o packed inteiro, garantindo que qualquer
+      // adulteração no AAD ou no plaintext seja detectada na decifragem —
+      // mesma propriedade de segurança do AEAD.
+      const nonce = jsOwned(sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES));
+
+      const aadLen = associatedData.length;
+      const packed = new Uint8Array(4 + aadLen + plaintext.length);
+      packed[0] = (aadLen >>> 24) & 0xff;
+      packed[1] = (aadLen >>> 16) & 0xff;
+      packed[2] = (aadLen >>>  8) & 0xff;
+      packed[3] =  aadLen         & 0xff;
+      for (let i = 0; i < aadLen;           i++) packed[4 + i]          = associatedData[i];
+      for (let i = 0; i < plaintext.length; i++) packed[4 + aadLen + i] = plaintext[i];
+
+      const ciphertext = jsOwned(sodium.crypto_secretbox_easy(packed, nonce, messageKey));
+
       const combined = new Uint8Array(nonce.length + ciphertext.length);
-      combined.set(nonce, 0);
-      combined.set(ciphertext, nonce.length);
+      for (let i = 0; i < nonce.length;      i++) combined[i]                  = nonce[i];
+      for (let i = 0; i < ciphertext.length; i++) combined[nonce.length + i]   = ciphertext[i];
       return combined;
     },
     decrypt: (messageKey, combined, associatedData) => {
-      const nonceLength = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
-      const nonce = combined.slice(0, nonceLength);
-      const ciphertext = combined.slice(nonceLength);
-      return sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, associatedData, nonce, messageKey);
+      const nonceLen = sodium.crypto_secretbox_NONCEBYTES;
+
+      const nonce = new Uint8Array(nonceLen);
+      for (let i = 0; i < nonceLen; i++) nonce[i] = combined[i];
+
+      const ciphertext = new Uint8Array(combined.length - nonceLen);
+      for (let i = 0; i < ciphertext.length; i++) ciphertext[i] = combined[nonceLen + i];
+
+      const packed = jsOwned(sodium.crypto_secretbox_open_easy(ciphertext, nonce, messageKey));
+
+      // Extrai e verifica o AAD embutido antes de retornar o plaintext.
+      const aadLen = ((packed[0] << 24) | (packed[1] << 16) | (packed[2] << 8) | packed[3]) >>> 0;
+      if (aadLen !== associatedData.length) throw new Error('Falha de autenticação: tamanho do AAD diverge');
+      for (let i = 0; i < aadLen; i++) {
+        if (packed[4 + i] !== associatedData[i]) throw new Error('Falha de autenticação: AAD diverge');
+      }
+
+      const ptLen = packed.length - 4 - aadLen;
+      const result = new Uint8Array(ptLen);
+      for (let i = 0; i < ptLen; i++) result[i] = packed[4 + aadLen + i];
+      return result;
     },
     toBase64,
   };
